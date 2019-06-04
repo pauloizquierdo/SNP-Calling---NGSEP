@@ -1,7 +1,9 @@
-SNP Calling with NGSEP
+SNP Calling with NGSEP - Paulo Izquierdo June / 2019
 
 Nucleic Acids Res. 2014 Apr;42(6):e44. doi: 10.1093/nar/gkt1381. Epub 2014 Jan 11.
 https://www.ncbi.nlm.nih.gov/pubmed/24413664
+
+Download the reference files from https://phytozome.jgi.doe.gov/pz/portal.html (fasta, gene.gff3, hard_mask)
 
 1. Check the quality of your reads with FASQC  
 
@@ -45,14 +47,15 @@ cutadapt -q 30,30 -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC -m 30 -o output_wa_q30_m
   -m minimun lengh allow
   --------------------------------------------------------------
 
-3. Deconvolution : separeate your samples in individual folders
+3. Deconvolution : separeate your samples in individual folders 
 
-  - Create a folder "reads"
+note: create in your home folder 4 additional folders : reads, mapping, genotyping, population, reference 
+
   - Download NGSEPcore.jar
   - Create a barcode barcodes_plate.txt file per lane:
 flowcell        lane    barcode DNASample
-HWW3TBBXX       1       ACCGT   B1402(1)
-HWW3TBBXX       1       CTGAC   B1402_4_99
+HWW3TBBXX       1       ACCGT   sample1
+HWW3TBBXX       1       CTGAC   sample2
 
 > SLURM Command ----------------------------------------
 
@@ -66,12 +69,197 @@ HWW3TBBXX       1       CTGAC   B1402_4_99
 module load Java/1.8.0_152
 module list
 
-cd /mnt/home/izquier7/Documents/YBC/reads
+cd /mnt/home/reads
 
-time java -Xmx4g -jar ../../NGSEPcore_3.0.2/NGSEPcore.jar Deconvolute -o /mnt/home/izquier7/Documents/YBC/
-reads -f H222KBBXY -l 5 barcode_plate1_YBC.txt ../YBC_1_S5_L005_R1_001_wa_q30_m50.fastq.gz
+time java -Xmx4g -jar ../../NGSEPcore_3.0.2/NGSEPcore.jar Deconvolute -o /mnt/home/reads -f (flow cell ID) -l 5 barcode_plate1_YBC.txt ../input_wa_q30_m30.fastq.gz
 
 scontrol show job $SLURM_JOB_ID
+
+4. Mapping
+
+  - Create a the RunPipeline file that use bowtie2 & samtools to align and organize the .bam:
+    
+p=$1;
+o=$2;
+s=SM:${p};
+f=../reads/${p}.fastq.gz;
+REFERENCE=/mnt/home/reference/Pvulgaris_442_v2.0.fa;
+BOWTIE2=/opt/software/bowtie2/2.2.3--GCC-4.4.5/bin/bowtie2;
+JAVA="java -d64";
+bowtie2 --rg-id ${p} --rg ${s} --rg PL:ILLUMINA ${o} -M 3 -t -x $REFERENCE -U ${f} 2> ${p}_bowtie2.log | samtools view -bhS - > ${p}_bowtie2.bam
+mkdir ${p}_tmpdir;
+$JAVA -Xmx4g -jar ${JARS_DIR}/SortSam.jar MAX_RECORDS_IN_RAM=1000000 SO=coordinate CREATE_INDEX=true TMP_DIR=${p}_tmpdir I=${p}_bowtie2.bam O=${p}_bowtie2_sorted.bam >& ${p}_bowtie2_sort.log;
+rm -rf ${p}_tmpdir;
+$JAVA -Xmx3g -jar ${JARS_DIR}/internal/NGSToolsApp.jar QualStats ${REFERENCE} ${p}_bowtie2_sorted.bam 200 >& ${p}_bowtie2_readpos.stats;
+$JAVA -Xmx3g -jar ${JARS_DIR}/internal/NGSToolsApp.jar CoverageStats ${p}_bowtie2_sorted.bam ${p}_bowtie2_coverage.stats >& ${p}_bowtie2_coverage.log;
+$JAVA -Xmx4g -jar ${JARS_DIR}/internal/NGSToolsApp.jar FindVariants -noRep -noRD -noRP  -h 0.0001 -maxBaseQS 30 -minQuality 40 -maxAlnsPerStartPos 100 -sampleId ${p} ${REFERENCE} ${p}_bowtie2_sorted.bam ${p}_bowtie2_NGSEP >& ${p}_bowtie2_NGSEP.log;
+
+> note : -h 0.0001 means that you are working with advanced RILs, so you are not expecting heterozygous 
+  
+  - Create the file to run the previous file in your samples "RunPipeline_1" (I suggest create files with ~ 20 samples to finish faster):
+  
+ ./runPipeline   Sample1;
+ ./runPipeline   Sample2;
+
+  - set permissions to run RunPipeline:
+      chmod 754 ./RunPipeline
+      chmod 754 ./RunPipeline_1
+
+> SLURM Command ----------------------------------------
+#!/bin/bash --login
+#SBATCH --time=48:00:00
+#SBATCH --ntasks=2
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=40G
+#SBATCH --job-name map1
+
+module load GCC/5.4.0-2.26  OpenMPI/1.10.3
+module load Bowtie2/2.2.3
+module load SAMtools/1.5
+module list
+
+cd /mnt/home/mapping
+
+./RunPipeline_1
+
+scontrol show job $SLURM_JOB_ID
+
+4.1 Total, unmapped and Unique reads
+
+Total Reads
+for f in `ls *bowtie2.log`; do (grep reads $f | awk '{print "'$f'",$1}'); done > total_reads.txt
+
+Unmapped Reads
+for f in `ls *bowtie2.log`; do (grep ") aligned 0 times" $f | awk '{print "'$f'",$1}'); done > unmapped.txt
+
+ReadsUniquelyMapped
+
+for f in `ls *bowtie2.log`; do (grep " 1 time" $f | awk '{print "'$f'",$1}'); done > unique.txt
+
+5. Merge variants of your samples
+
+> SLURM Command ----------------------------------------
+
+#!/bin/bash --login
+#SBATCH --time=02:00:00
+#SBATCH --ntasks=4
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=40G
+#SBATCH --job-name merge
+
+cd /mnt/home/genotyping
+
+java -d64 -jar /mnt/home/software/internal/NGSToolsApp_2.1.0.jar  MergeVariants /mnt/ho
+me/Documents/reference/sequenceNames.txt merge_variants.vcf ../mapping/*_bowtie2_NGSEP.vcf >& merge_v
+ariants.log
+
+scontrol show job $SLURM_JOB_ID
+
+notes: -sequenceNames is a file with the names of chromosomes and scaffolds in the reference genome
+       -merge_variants is the output
+---------------------------------------------------------
+
+
+6. genotyping (this part is gonna create a VCF for each sample)
+
+  - Create RunGenotyping :
+
+p=$1;
+REFERENCE=/mnt/home/reference/Pvulgaris_442_v2.0.fa;
+JAVA="java -d64";
+KNOWN_VARS=merge_variants.vcf
+$JAVA -Xmx4g -jar ${JARS_DIR}/internal/NGSToolsApp.jar FindVariants -noRD -noRP -noRep -noNewCNV -h 0.0001
+ -maxBaseQS 30 -maxAlnsPerStartPos 100 -ignore5 1 -ignore3 1 -sampleId ${p} -knownVariants ${KNOWN_VARS} $
+{REFERENCE} ../mapping/${p}_bowtie2_sorted.bam ${p}_bowtie2_NGSEP_gt >& ${p}_bowtie2_NGSEP_gt.log;
+
+  - Create the file to run the previous file in your samples "RunGenotyping_1" (I suggest create files with ~ 20 samples to finish    faster):
+  
+  ./RunGenotyping sample1;
+  ./RunGenotyping sample2;
+
+7. Merge VCFs of all your samples
+
+> SLURM Command ----------------------------------------
+#!/bin/bash --login
+#SBATCH --time=72:00:00
+#SBATCH --ntasks=4
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=40G
+#SBATCH --job-name mergevcf
+
+cd /mnt/home/population
+
+java -Xmx6g -jar ../../software/internal/NGSToolsApp_2.1.0.jar MergeVCF ../../reference/sequenceNames.txt
+../genotyping/*_bowtie2_NGSEP_gt.vcf 1> merge_population.vcf
+
+
+8. Annotation
+
+> SLURM Command ----------------------------------------
+#!/bin/bash --login
+#SBATCH --time=16:00:00
+#SBATCH --ntasks=4
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=40G
+#SBATCH --job-name annotation
+
+cd /mnt/home/population
+
+time java -Xmx4g -jar ../../software/internal/NGSToolsApp_2.1.0.jar Annotate merge_population ../../reference/Pvulgaris_442_v2.1.gene.gff3 ../../reference/Pvulgaris_442_v2.0
+.fa > merge_population_annotated.vcf
+
+qstat -f $PBS_JOBID
+
+------------------------------------
+
+9. With the previous steps you are gonna have the annotated VCF from your population and you can start to filter your VCF: 
+
+-frs filter repetitive sequences
+
+time java -Xmx4g -jar /data/software/internal/NGSToolsApp_2.1.0.jar  FilterVCF -frs /population/Pvulgaris218_repMasked.txt merge_population_annotated.vcf 1> merge_population_annotated_repMasked.vcf 2> merge_population_annotated_repMasked.log 
+
+	-Min individuals genotyped
+time java -Xmx4g -jar /data/software/internal/NGSToolsApp_2.1.0.jar  FilterVCF -minI integer merge_population_annotated_repMasked.vcf 1> merge_population_annotated_repMasked_I160.vcf 2> merge_population_annotated_repMasked_I160.log 
+
+	-MAF individuals genotyped
+time java -Xmx4g -jar /data/software/internal/NGSToolsApp_2.1.0.jar  FilterVCF -minMAF 0.05 merge_population_annotated_repMasked_I160.vcf 1> merge_population_annotated_repMasked_I160_MAF005.vcf 2>  merge_population_annotated_repMasked_I160_MAF005.log 
+
+Note: for more filters check the README file from NGSEP
+
+10. VCF's stats 
+
+  -This command gives you the SNPs per sample and the coding and non-coding SNP information
+
+time java -Xmx4g -jar /data/software/internal/NGSToolsApp_2.1.3.jar SummaryStats merge_population_annotated_repMasked_I160_MAF005.vcf > merge_population_annotated_repMasked_I160_MAF005.stats 
+
+11. Converter: 
+  - Another useful NGSEP's option is the conversion to several formats :
+  
+  java -jar NGSToolsApp_2.1.0.jar  ConvertVCF <OPTIONS> <INPUT_FILE> <OUTPUT_PREFIX>
+
+time java -Xmx100g -jar /data/software/internal/NGSToolsApp_2.1.0.jar ConvertVCF -printStructure GBSVictor_NoRep_Masked_Q40_annotated.vcf  GBSVictor_NoRep_Masked_Q40_annotated_Structure &
+
+
+Options:
+	-printStructure		: Prints input format for structure
+	-printFasta		: Prints a virtual multiple sequence alignment in fasta format. Useful to build phylogenetic trees
+	-printMatrix		: Prints genotypes in a simple ACGT format which can be imported to excel 
+	-printHapmap		: Prints Hapmap format, which can be used in programs such as Tassel
+	-printSpagedi		: Prints input files for Spagedi
+	-printPlink		: Prints input files for Plink
+	-printHaploview		: Prints input files for Haploview
+	-printEmma		: Prints input files for Emma
+	-printPowerMarker	: Prints input files for Powermarker
+	-printEigensoft		: Prints input files for Eigensoft
+	-printFlapjack		: Prints input files for Flapjack
+	-printrrBLUP		: Prints input files for rrBLUP (I did this one!!!!!)
+  
+  
+  
+  >>>>>>>>>>>>>>> Hopefully, this pipeline can help you a little bit in your analysis. Good luck!>>>>>>>>>>>>>>>>>>>>>>
+
+
+
 
 
 
