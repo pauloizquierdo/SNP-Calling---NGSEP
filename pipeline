@@ -1,0 +1,77 @@
+SNP Calling with NGSEP
+
+Nucleic Acids Res. 2014 Apr;42(6):e44. doi: 10.1093/nar/gkt1381. Epub 2014 Jan 11.
+https://www.ncbi.nlm.nih.gov/pubmed/24413664
+
+1. Check the quality of your reads with FASQC  
+
+> SLURM Command -------------------------------------
+
+#!/bin/bash --login
+#SBATCH --time=02:00:00
+#SBATCH --ntasks=2
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=10G
+#SBATCH --job-name fastqc_plate1
+
+module load FastQC/0.11.7-Java-1.8.0_162
+
+cd /mnt/home/folder_where_is_your_input_and_SLURM_command
+
+fastqc \
+-o /mnt/home/output_folder -f fastq -t 2 input.fastq.gz
+
+scontrol show job $SLURM_JOB_ID
+---------------------------------------------------------
+
+2. Clean the raw fasq.gz - You can use Cutadapt
+
+> SLURM Command ----------------------------------------
+#!/bin/bash --login
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=4
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=40G
+#SBATCH --job-name cutadapt_plate1
+
+module load Python/3.6.4
+
+cd /mnt/home/folder_where_is_your_SLURM_command
+
+cutadapt -q 30,30 -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC -m 30 -o output_wa_q30_m30.fastq.gz input.fastq.gz
+
+  -q quality
+  -a adapter to remove (usually the fasqc come with adapters)
+  -m minimun lengh allow
+  --------------------------------------------------------------
+
+3. Deconvolution : separeate your samples in individual folders
+
+  - Create a folder "reads"
+  - Download NGSEPcore.jar
+  - Create a barcode barcodes_plate.txt file per lane:
+flowcell        lane    barcode DNASample
+HWW3TBBXX       1       ACCGT   B1402(1)
+HWW3TBBXX       1       CTGAC   B1402_4_99
+
+> SLURM Command ----------------------------------------
+
+#!/bin/bash --login
+#SBATCH --time=23:00:00
+#SBATCH --ntasks=2
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=32G
+#SBATCH --job-name deco_plate1
+
+module load Java/1.8.0_152
+module list
+
+cd /mnt/home/izquier7/Documents/YBC/reads
+
+time java -Xmx4g -jar ../../NGSEPcore_3.0.2/NGSEPcore.jar Deconvolute -o /mnt/home/izquier7/Documents/YBC/
+reads -f H222KBBXY -l 5 barcode_plate1_YBC.txt ../YBC_1_S5_L005_R1_001_wa_q30_m50.fastq.gz
+
+scontrol show job $SLURM_JOB_ID
+
+
+
